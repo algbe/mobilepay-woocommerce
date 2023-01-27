@@ -2,7 +2,7 @@
 
 class MobilePay_HttpClient
 {
-    private $base_url = "https://wp7586.danskenet.net/integrator/";
+    private $base_url = "https://mobilepayintegrator.azurewebsites.net/";
     private $access_token = "";
 
     public function __construct($access_token)
@@ -10,9 +10,9 @@ class MobilePay_HttpClient
         $this->access_token = $access_token;
     }
 
-    public function create_payment($payment)
+    public function create_payment_link($params)
     {
-        return $this->post("payment", $payment);
+        return $this->post("Payment", $params);
     }
 
     private function post($path, $request)

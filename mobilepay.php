@@ -29,10 +29,11 @@ function mobilepay_init_gateway_class() {
 
         public function __construct() {
             $this->id = 'mobilepay';
-            $this->icon = 'https://avatars.githubusercontent.com/u/22961759?s=200&v=4';
+            $this->icon = 'https://avatars.githubusercontent.com/u/22961759?s=30&v=4';
             $this->method_title = 'MobilePay';
             $this->method_description = 'Pay with MobilePay';
             $this->has_fields = true;
+            $this->title = "MobilePay";
 
             $this->supports = array(
                 'products'
@@ -42,13 +43,13 @@ function mobilepay_init_gateway_class() {
 
             $this->init_settings();
 
-            $this->title = $this->get_option('title');
             $this->enabled = $this->get_option('enabled');
             $this->vat_number = $this->get_option('vat_number');
-            $this->private_key = $this->get_option('private_key');
+            $this->private_key = get_option('private_key');
 
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
             add_action( 'woocommerce_api_mobilepay_payment_complete', array( $this, 'webhook' ) );
+            
         }
 
         private function get_new_keys()
@@ -82,7 +83,7 @@ function mobilepay_init_gateway_class() {
                 return;
             }
 
-            $this->add_option($option_name, $value);
+            add_option($option_name, $value);
         }
 
         public function process_admin_options()
@@ -94,18 +95,34 @@ function mobilepay_init_gateway_class() {
             if($generate_new_keys === 'yes')
             {
                 $keys = $this->get_new_keys();
-                $this->upsert_option('private_key', $keys['private_key']);
-                $this->upsert_option('public_key', $keys['public_key']);
+                $this->update_option('private_key', $keys['private_key']);
+                $this->update_option('public_key', $keys['public_key']);
 
                 $this->update_option('generate_new_keys', 'no');
 
                 $encoded_key = base64_encode($keys['public_key']);
-                $url = sprintf("https://wp7586.danskenet.net/integrator/Integration?vatNumber=%s&publicKey=%s", $this->vat_number, $encoded_key);
+                $encoded_redirect_url = base64_encode($this->get_current_url());
+                $url = sprintf("https://mobilepayintegrator.azurewebsites.net/Integration/Auth?vatNumber=%s&publicKey=%s&clientRedirectUrl=%s", $this->vat_number, $encoded_key, $encoded_redirect_url);
 
                 header("Location: $url");
                 exit;
             }
 
+        }
+        
+        private function get_current_url() {
+
+            if(isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on')   
+                 $url = "https://";   
+            else  
+                 $url = "http://";   
+            // Append the host(domain name, ip) to the URL.   
+            $url.= $_SERVER['HTTP_HOST'];   
+            
+            // Append the requested resource location to the URL   
+            $url.= $_SERVER['REQUEST_URI'];    
+
+            return $url;
         }
 
         public function init_form_fields() {
@@ -150,33 +167,65 @@ function mobilepay_init_gateway_class() {
             );
         }
 
-        public function payment_fields() {
-
-            $jwt = new MobilePay_JWT($this->private_key, $this->vat_number);
-            $http_client = new MobilePay_HttpClient($jwt->get_token());
-
-
-            $payment_response = $http_client->create_payment(array("create" => "payment"));
-
-            echo sprintf("<pre>%s</pre>", json_encode($payment_response));
-
-           // echo $this->get_option("public_key").PHP_EOL.$jwt->get_token();
-        }
-
-        public function validate_fields() {
-            return true;
-
-        }
-
         public function process_payment( $order_id ) {
-
+            
+            global $woocommerce;
             $order = wc_get_order( $order_id );
-
-            return array(
-                'result' => 'success',
-                'redirect' => $this->get_return_url( $order )
+            
+            $jwt = new MobilePay_JWT($this->get_option('private_key'), $this->get_option('vat_number'));
+            $httpClient = new MobilePay_HttpClient($jwt->get_token());
+            
+            $request = array(
+                'ConsumerName' => $order->get_billing_first_name(),
+                'TotalAmount' => $order->get_total(),
+                'TotalVATAmount' => $order->get_total_tax(),
+                'ConsumerAddressLines' => array (
+                    $order->get_billing_address_1(),
+                    $order->get_billing_address_2(),
+                    $order->get_billing_country()
+                ),
+                'InvoiceNumber' => $order->get_order_number(),
+                'RedirectUrl' => $this->get_return_url( $order ),
             );
 
+            foreach ( $order->get_items() as $item_id => $item ) {
+
+                $request['InvoiceArticles'][] = array(
+                    //'ArticleNumber' => (string)$item->get_product_id(),
+                    'ArticleDescription' => $item->get_name(),
+                    'TotalVATAmount' => $item->get_subtotal_tax(),
+                    'TotalPriceIncludingVat' => $item->get_subtotal(),
+                    'Unit' => $item->get_product()->get_sku(),
+                    'Quantity' => $item->get_quantity(),
+                    'PricePerUnit' => $item->get_total()
+                );
+            }
+
+            error_log(print_r($request, true));
+
+            $mpResponse = $httpClient->create_payment_link( $request );
+
+            error_log(print_r($mpResponse, true));
+
+            
+            // Mark as on-hold (we're awaiting the cheque)
+            $order->update_status('on-hold', __( 'Awaiting cheque payment', 'woocommerce' ));
+
+            // Reduce stock levels
+            $order->reduce_order_stock();
+
+            // Remove cart
+            $woocommerce->cart->empty_cart();
+
+            // Return thank you redirect
+            return array(
+                'result' => 'success',
+                'redirect' => $mpResponse['response']
+            );
+            //$url = sprintf("https://mpeshopintegrator.azurewebsites.net/Integration/Auth?vatNumber=%s&publicKey=%s", $this->vat_number, $encoded_key);
+
+            //header("Location: $url");
+            //exit;
         }
 
         public function webhook() {
@@ -185,6 +234,14 @@ function mobilepay_init_gateway_class() {
             $order->reduce_order_stock();
 
         }
+        
+        public function payment_fields() {
+        }
+
+        public function validate_fields() {
+            return true;
+        }
+
 
     }
 
